@@ -1,0 +1,71 @@
+environment: "demo"
+
+api:
+  production_base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  demo_base_url: "https://demo-api.kalshi.co/trade-api/v2"
+  production_ws_url: "wss://api.elections.kalshi.com/trade-api/ws/v2"
+  demo_ws_url: "wss://demo-api.kalshi.co/trade-api/ws/v2"
+  read_rate_limit: 20
+  write_rate_limit: 10
+  request_timeout: 10
+  max_retries: 3
+  retry_backoff_base: 1.0
+
+engine:
+  tick_interval: 1.0
+  markets: []
+  market_filter:
+    min_volume: 100
+    min_open_interest: 50
+    max_days_to_close: 30
+    status: "open"
+
+strategies:
+  market_maker:
+    enabled: true
+    markets: []
+    params:
+      target_spread_cents: 4
+      min_spread_cents: 2
+      max_spread_cents: 10
+      order_size: 10
+      max_position: 100
+      inventory_skew_factor: 0.5
+      gamma: 0.1
+      sigma_window: 50
+      quote_refresh_seconds: 5.0
+      edge_threshold: 0.02
+  mean_reversion:
+    enabled: false
+    markets: []
+    params:
+      lookback_periods: 50
+      entry_z_score: 2.0
+      exit_z_score: 0.5
+      order_size: 5
+      max_position: 50
+      bollinger_std_dev: 2.0
+  value:
+    enabled: false
+    markets: []
+    params:
+      edge_threshold: 0.05
+      kelly_fraction: 0.25
+      max_position: 50
+      rebalance_interval: 60
+
+risk:
+  max_position_per_market: 100
+  max_total_exposure_cents: 500000
+  daily_loss_limit_pct: 5.0
+  max_drawdown_pct: 15.0
+  max_open_orders: 50
+  min_balance_reserve_cents: 10000
+
+database:
+  path: "kalshi_bot.db"
+
+logging:
+  level: "INFO"
+  format: "console"
+  file: null
