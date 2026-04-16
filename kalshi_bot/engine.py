@@ -287,7 +287,13 @@ class TradingEngine:
         # Cancel orders first
         for order_id in signal.orders_to_cancel:
             try:
-                if not self._dry_run:
+                if self._dry_run:
+                    # Remove from paper orders list
+                    self._paper_orders = [
+                        o for o in self._paper_orders if o["order_id"] != order_id
+                    ]
+                    await self._db.update_order_status(order_id, "canceled")
+                else:
                     await self._rest.cancel_order(order_id)
                 self._risk.unregister_order()
             except KalshiNotFoundError:
@@ -336,6 +342,10 @@ class TradingEngine:
                     "placed_at": time.time(),
                 }
                 self._paper_orders.append(paper_order)
+                # Track order ID so strategy can cancel it next cycle
+                if isinstance(strategy, MarketMakerStrategy):
+                    is_bid = req.action == OrderAction.BUY
+                    strategy.track_order_id(req.ticker, paper_id, is_bid)
                 # Record in DB so dashboard can see it
                 await self._db.record_order({
                     "order_id": paper_id,
@@ -462,7 +472,7 @@ class TradingEngine:
                             liquid.append((depth, 0, ticker, title))
 
         liquid.sort(key=lambda x: (-x[0], x[1]))
-        short_picks = [t for _, _, t, _ in liquid[:25]]
+        short_picks = [t for _, _, t, _ in liquid[:10]]
 
         for depth, neg_spread, ticker, title in liquid[:10]:
             self._log.info(
@@ -522,7 +532,7 @@ class TradingEngine:
             if t not in seen:
                 seen.add(t)
                 final.append(t)
-            if len(final) >= 30:
+            if len(final) >= 15:
                 break
 
         if not final:
@@ -719,10 +729,22 @@ class TradingEngine:
     # ─── Paper Trading Simulation ───────────────────────────────────
 
     async def _check_paper_fills(self) -> None:
-        """Check if any paper orders would have been filled by current market prices."""
+        """Check if any paper orders would have been filled by current market prices.
+
+        Only fills ONE order per ticker per tick to prevent avalanche fills.
+        Enforces position limits before filling.
+        """
         filled_indices = []
+        filled_tickers: set[str] = set()  # Only one fill per ticker per tick
+        max_pos = self._config.risk.max_position_per_market
+
         for i, order in enumerate(self._paper_orders):
             ticker = order["ticker"]
+
+            # Only one fill per ticker per tick cycle
+            if ticker in filled_tickers:
+                continue
+
             snapshot = self._market_snapshots.get(ticker)
             if not snapshot or not snapshot.orderbook:
                 continue
@@ -731,20 +753,25 @@ class TradingEngine:
             price = order["price"]
             action = order["action"]
             side = order["side"]
+            count = order["count"]
+
+            # Check position limit before filling
+            current_pos = self._paper_positions.get(ticker, 0)
+            if action == "buy" and current_pos >= max_pos:
+                continue
+            if action == "sell" and current_pos <= -max_pos:
+                continue
 
             # Check if market has crossed our price
             filled = False
             if action == "buy":
-                # Buy order fills when best ask <= our bid price
                 if side == "yes" and ob.best_ask and ob.best_ask <= price:
                     filled = True
                 elif side == "no":
-                    # No-side buy: fills when best yes bid implies no-ask <= our price
                     no_ask = 100 - ob.best_bid if ob.best_bid else None
                     if no_ask and no_ask <= price:
                         filled = True
             else:  # sell
-                # Sell order fills when best bid >= our ask price
                 if side == "yes" and ob.best_bid and ob.best_bid >= price:
                     filled = True
                 elif side == "no":
@@ -754,14 +781,14 @@ class TradingEngine:
 
             if filled:
                 filled_indices.append(i)
-                count = order["count"]
+                filled_tickers.add(ticker)
 
                 # Update paper positions
                 if action == "buy":
                     delta = count if side == "yes" else -count
                 else:
                     delta = -count if side == "yes" else count
-                self._paper_positions[ticker] = self._paper_positions.get(ticker, 0) + delta
+                self._paper_positions[ticker] = current_pos + delta
 
                 # Track cost (negative for buys, positive for sells)
                 cost_cents = price * count
@@ -794,7 +821,6 @@ class TradingEngine:
                     "price": price,
                 })
 
-                # Update order status in DB
                 await self._db.update_order_status(order["order_id"], "executed")
 
                 # Notify strategies

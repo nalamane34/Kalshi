@@ -26,16 +26,16 @@ strategies:
     enabled: true
     markets: []
     params:
-      target_spread_cents: 4
-      min_spread_cents: 2
-      max_spread_cents: 10
-      order_size: 10
-      max_position: 100
-      inventory_skew_factor: 0.5
-      gamma: 0.1
+      target_spread_cents: 6
+      min_spread_cents: 4
+      max_spread_cents: 15
+      order_size: 5
+      max_position: 25
+      inventory_skew_factor: 0.3
+      gamma: 0.05
       sigma_window: 50
-      quote_refresh_seconds: 5.0
-      edge_threshold: 0.02
+      quote_refresh_seconds: 15.0
+      edge_threshold: 0.03
   mean_reversion:
     enabled: false
     markets: []
