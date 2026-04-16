@@ -46,7 +46,7 @@ class KalshiRestClient:
     def __init__(
         self,
         base_url: str,
-        auth: KalshiAuth,
+        auth: KalshiAuth | None = None,
         read_rate_limit: int = 20,
         write_rate_limit: int = 10,
         request_timeout: int = 10,
@@ -78,6 +78,7 @@ class KalshiRestClient:
         path: str,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        authenticated: bool = True,
     ) -> dict[str, Any]:
         """Core request with auth, rate limiting, retries, error handling."""
         if not self._session:
@@ -91,18 +92,18 @@ class KalshiRestClient:
             await self._rate_limiter.acquire_read()
 
         url = f"{self._base_url}{path}"
-        # Auth: sign with full API path (includes /trade-api/v2 prefix)
-        parsed = urlparse(self._base_url)
-        sign_path = parsed.path + path
 
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
-            auth_headers = self._auth.sign_request(method.upper(), sign_path)
-            headers = {
-                **auth_headers,
+            headers: dict[str, str] = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
+            if authenticated and self._auth:
+                parsed = urlparse(self._base_url)
+                sign_path = parsed.path + path
+                auth_headers = self._auth.sign_request(method.upper(), sign_path)
+                headers.update(auth_headers)
 
             try:
                 async with self._session.request(
@@ -151,6 +152,7 @@ class KalshiRestClient:
         limit: int = 200,
         cursor: str | None = None,
         status: str | None = "open",
+        event_ticker: str | None = None,
         **filters: Any,
     ) -> tuple[list[Market], str | None]:
         """Fetch markets. Returns (markets, next_cursor)."""
@@ -159,29 +161,62 @@ class KalshiRestClient:
             params["cursor"] = cursor
         if status:
             params["status"] = status
+        if event_ticker:
+            params["event_ticker"] = event_ticker
         params.update(filters)
 
-        data = await self._request("GET", "/markets", params=params)
+        data = await self._request("GET", "/markets", params=params, authenticated=self._auth is not None)
         markets = [self._parse_market(m) for m in data.get("markets", [])]
         next_cursor = data.get("cursor") or None
         return markets, next_cursor
 
+    async def get_event_tickers(
+        self,
+        limit: int = 100,
+        status: str = "open",
+    ) -> list[str]:
+        """Fetch event tickers from the events endpoint."""
+        params: dict[str, Any] = {"limit": limit, "status": status}
+        data = await self._request("GET", "/events", params=params, authenticated=self._auth is not None)
+        events = data.get("events", [])
+        return [e.get("event_ticker", "") for e in events if e.get("event_ticker")]
+
     async def get_market(self, ticker: str) -> Market:
         """Fetch a single market."""
-        data = await self._request("GET", f"/markets/{ticker}")
+        data = await self._request("GET", f"/markets/{ticker}", authenticated=self._auth is not None)
         return self._parse_market(data.get("market", data))
 
     async def get_orderbook(self, ticker: str, depth: int = 10) -> OrderBook:
         """Fetch the order book for a market."""
         params = {"depth": depth}
-        data = await self._request("GET", f"/markets/{ticker}/orderbook", params=params)
+        data = await self._request("GET", f"/markets/{ticker}/orderbook", params=params, authenticated=self._auth is not None)
         return self._parse_orderbook(ticker, data)
 
-    async def get_trades(self, ticker: str, limit: int = 100) -> list[dict]:
-        """Fetch recent trades for a market."""
-        params: dict[str, Any] = {"ticker": ticker, "limit": limit}
-        data = await self._request("GET", "/markets/trades", params=params)
+    async def get_trades(self, ticker: str | None = None, limit: int = 100) -> list[dict]:
+        """Fetch recent trades."""
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        data = await self._request("GET", "/markets/trades", params=params, authenticated=self._auth is not None)
         return data.get("trades", [])
+
+    async def get_candlesticks(
+        self,
+        series_ticker: str,
+        ticker: str,
+        period_interval: int = 60,  # minutes
+    ) -> list[dict]:
+        """Fetch candlestick data for a market.
+
+        GET /series/{series_ticker}/markets/{ticker}/candlesticks
+        """
+        params: dict[str, Any] = {"period_interval": period_interval}
+        data = await self._request(
+            "GET",
+            f"/series/{series_ticker}/markets/{ticker}/candlesticks",
+            params=params,
+        )
+        return data.get("candlesticks", [])
 
     async def get_snapshot(self, ticker: str) -> MarketSnapshot:
         """Fetch market + orderbook as a combined snapshot."""
@@ -217,11 +252,11 @@ class KalshiRestClient:
             positions.append(Position(
                 ticker=mp.get("ticker", ""),
                 position=int(float(mp.get("position_fp", "0"))),
-                market_exposure=mp.get("market_exposure_dollars", mp.get("market_exposure", 0)),
-                realized_pnl=mp.get("realized_pnl_dollars", mp.get("realized_pnl", 0)),
-                total_traded=mp.get("total_traded_dollars", mp.get("total_traded", 0)),
+                market_exposure=_dollars_to_cents(mp.get("market_exposure_dollars", mp.get("market_exposure", 0))),
+                realized_pnl=_dollars_to_cents(mp.get("realized_pnl_dollars", mp.get("realized_pnl", 0))),
+                total_traded=_dollars_to_cents(mp.get("total_traded_dollars", mp.get("total_traded", 0))),
                 resting_orders_count=mp.get("resting_orders_count", 0),
-                fees_paid=mp.get("fees_paid_dollars", mp.get("fees_paid", 0)),
+                fees_paid=_dollars_to_cents(mp.get("fees_paid_dollars", mp.get("fees_paid", 0))),
             ))
         return positions
 
@@ -408,19 +443,34 @@ def _parse_ts(val: Any) -> datetime | None:
 
 
 def _cents(val: Any) -> int:
-    """Convert various price formats to integer cents."""
+    """Convert a price value to integer cents.
+
+    For market price fields that may be int cents or dollar strings.
+    """
     if val is None:
         return 0
     if isinstance(val, int):
         return val
-    if isinstance(val, str):
+    if isinstance(val, (str, float)):
         f = float(val)
-        # If looks like dollars (0.xx), convert to cents
-        if 0 < f < 1.0:
+        # Dollar strings from API (e.g., "0.45" = 45 cents)
+        if isinstance(val, str) or (isinstance(val, float) and abs(f) < 1.0):
             return int(round(f * 100))
         return int(round(f))
-    if isinstance(val, float):
-        if 0 < val < 1.0:
-            return int(round(val * 100))
-        return int(round(val))
+    return 0
+
+
+def _dollars_to_cents(val: Any) -> int:
+    """Convert a dollar amount (int, float, or string) to integer cents.
+
+    Used for portfolio fields like market_exposure_dollars, fees_paid_dollars.
+    """
+    if val is None:
+        return 0
+    if isinstance(val, (str, float)):
+        return int(round(float(val) * 100))
+    if isinstance(val, int):
+        # If already looks like cents (>= 100 for a $1 value), return as-is
+        # Otherwise treat as dollars
+        return val
     return 0

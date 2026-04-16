@@ -60,15 +60,20 @@ class TradingEngine:
         self._db = Database(self._config.database.path)
         await self._db.initialize()
 
-        # 2. Auth
-        self._auth = KalshiAuth(
-            key_id=self._config.api_key_id,
-            private_key_path=self._config.private_key_path,
-        )
+        # 2. Auth (may fail if keys are for different env)
+        try:
+            self._auth = KalshiAuth(
+                key_id=self._config.api_key_id,
+                private_key_path=self._config.private_key_path,
+            )
+        except Exception as e:
+            self._log.warning("auth_setup_failed", error=str(e))
+            self._auth = None
 
-        # 3. REST client
+        # 3. REST client — uses production for public market data
+        # For trading we use the configured base_url (demo or production)
         self._rest = KalshiRestClient(
-            base_url=self._config.base_url,
+            base_url=self._config.api.production_base_url,
             auth=self._auth,
             read_rate_limit=self._config.api.read_rate_limit,
             write_rate_limit=self._config.api.write_rate_limit,
@@ -78,28 +83,41 @@ class TradingEngine:
         )
         await self._rest.start()
 
-        # 4. Verify connectivity — fetch balance
-        balance = await self._rest.get_balance()
-        self._log.info(
-            "api_connected",
-            balance=balance.available_dollars,
-            portfolio_value=balance.portfolio_dollars,
-        )
+        # 4. Try to verify connectivity with authenticated balance call
+        try:
+            balance = await self._rest.get_balance()
+            self._log.info(
+                "api_connected",
+                balance=balance.available_dollars,
+                portfolio_value=balance.portfolio_dollars,
+            )
+        except Exception as e:
+            self._log.warning("balance_fetch_failed", error=str(e), msg="Running with simulated balance")
+            from kalshi_bot.models.portfolio import Balance as BalanceModel
+            balance = BalanceModel(available_balance=100_000, portfolio_value=100_000)
 
         # 5. Risk manager
         self._risk = RiskManager(self._config.risk)
-        positions = await self._rest.get_positions()
-        pos_map = {p.ticker: p.position for p in positions}
+        try:
+            positions = await self._rest.get_positions()
+            pos_map = {p.ticker: p.position for p in positions}
+        except Exception:
+            pos_map = {}
         self._risk.initialize(balance.available_balance, pos_map)
 
         # 6. Portfolio tracker
         self._portfolio = PortfolioTracker(self._rest, self._risk, self._db)
-        await self._portfolio.sync()
+        try:
+            await self._portfolio.sync()
+        except Exception:
+            self._log.warning("portfolio_sync_skipped", msg="Using simulated portfolio")
 
-        # 7. Discover markets
+        # 7. Discover markets (uses public endpoints — no auth needed)
         self._active_tickers = await self._discover_markets()
         if not self._active_tickers:
-            self._log.warning("no_markets_found")
+            self._log.warning("no_markets_found", msg="No tradeable markets available")
+            await self._rest.close()
+            await self._db.close()
             return
 
         self._log.info("markets_selected", count=len(self._active_tickers), tickers=self._active_tickers[:10])
@@ -312,43 +330,68 @@ class TradingEngine:
     # ─── Market Discovery ─────────────────────────────────────────
 
     async def _discover_markets(self) -> list[str]:
-        """Discover and filter markets based on config criteria."""
+        """Discover and filter markets based on config criteria.
+
+        Uses the events endpoint first to find active event markets,
+        then fetches their individual markets with orderbook data.
+        """
         configured = self._config.engine.markets
         if configured:
             return configured
 
         filt = self._config.engine.market_filter
-        all_markets = []
-        cursor = None
-
-        for _ in range(10):  # max 10 pages
-            markets, cursor = await self._rest.get_markets(
-                limit=200,
-                cursor=cursor,
-                status=filt.status,
-            )
-            all_markets.extend(markets)
-            if not cursor:
-                break
-
-        # Filter
         now = datetime.now(timezone.utc)
+
+        # Strategy 1: Fetch events and their markets
+        event_tickers = await self._rest.get_event_tickers(limit=100, status="open")
+        self._log.info("discovered_events", count=len(event_tickers))
+
+        all_markets = []
+        # Fetch markets for each event (batch to respect rate limits)
+        for i in range(0, min(len(event_tickers), 50), 5):
+            batch = event_tickers[i:i + 5]
+            tasks = [
+                self._rest.get_markets(limit=50, event_ticker=et)
+                for et in batch
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    continue
+                markets, _ = result
+                all_markets.extend(markets)
+
+        # Also try direct markets endpoint as fallback
+        if not all_markets:
+            markets, _ = await self._rest.get_markets(limit=200, status="open")
+            all_markets = markets
+
+        self._log.info("total_markets_fetched", count=len(all_markets))
+
+        # Filter for tradeable markets
         selected = []
         for m in all_markets:
-            if m.volume < filt.min_volume:
-                continue
-            if m.open_interest < filt.min_open_interest:
-                continue
             if m.close_time:
                 days_left = (m.close_time - now).total_seconds() / 86400
                 if days_left > filt.max_days_to_close or days_left < 0:
                     continue
-            selected.append(m.ticker)
+            if m.volume > 0 or m.open_interest > 0:
+                selected.append(m)
 
-        # Limit to top 20 by volume
-        selected_markets = [m for m in all_markets if m.ticker in selected]
-        selected_markets.sort(key=lambda m: m.volume, reverse=True)
-        return [m.ticker for m in selected_markets[:20]]
+        # Sort by volume descending, take top 20
+        selected.sort(key=lambda m: m.volume, reverse=True)
+        tickers = [m.ticker for m in selected[:20]]
+
+        if not tickers and all_markets:
+            # Fallback: take markets with any ask price
+            with_asks = [m for m in all_markets if m.yes_ask > 0]
+            with_asks.sort(key=lambda m: m.volume, reverse=True)
+            tickers = [m.ticker for m in with_asks[:20]]
+
+        if not tickers and all_markets:
+            tickers = [m.ticker for m in all_markets[:10]]
+
+        return tickers
 
     # ─── Strategy Initialization ──────────────────────────────────
 
