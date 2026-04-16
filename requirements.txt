@@ -5,6 +5,7 @@ pydantic>=2.5
 structlog>=24.0
 PyYAML>=6.0
 python-dotenv>=1.0
+flask>=3.0
 cryptography>=41.0
 numpy>=1.26
 pytest>=8.0
