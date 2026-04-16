@@ -153,6 +153,10 @@ class KalshiRestClient:
         cursor: str | None = None,
         status: str | None = "open",
         event_ticker: str | None = None,
+        series_ticker: str | None = None,
+        max_close_ts: int | None = None,
+        min_close_ts: int | None = None,
+        tickers: str | None = None,
         **filters: Any,
     ) -> tuple[list[Market], str | None]:
         """Fetch markets. Returns (markets, next_cursor)."""
@@ -163,6 +167,14 @@ class KalshiRestClient:
             params["status"] = status
         if event_ticker:
             params["event_ticker"] = event_ticker
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if max_close_ts is not None:
+            params["max_close_ts"] = max_close_ts
+        if min_close_ts is not None:
+            params["min_close_ts"] = min_close_ts
+        if tickers:
+            params["tickers"] = tickers
         params.update(filters)
 
         data = await self._request("GET", "/markets", params=params, authenticated=self._auth is not None)
@@ -172,14 +184,29 @@ class KalshiRestClient:
 
     async def get_event_tickers(
         self,
-        limit: int = 100,
+        limit: int = 200,
         status: str = "open",
+        max_pages: int = 4,
     ) -> list[str]:
-        """Fetch event tickers from the events endpoint."""
-        params: dict[str, Any] = {"limit": limit, "status": status}
-        data = await self._request("GET", "/events", params=params, authenticated=self._auth is not None)
-        events = data.get("events", [])
-        return [e.get("event_ticker", "") for e in events if e.get("event_ticker")]
+        """Fetch event tickers from the events endpoint with pagination."""
+        all_tickers: list[str] = []
+        cursor = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"limit": limit, "status": status}
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._request(
+                "GET", "/events", params=params,
+                authenticated=self._auth is not None,
+            )
+            events = data.get("events", [])
+            all_tickers.extend(
+                e.get("event_ticker", "") for e in events if e.get("event_ticker")
+            )
+            cursor = data.get("cursor")
+            if not events or not cursor:
+                break
+        return all_tickers
 
     async def get_market(self, ticker: str) -> Market:
         """Fetch a single market."""
@@ -191,6 +218,45 @@ class KalshiRestClient:
         params = {"depth": depth}
         data = await self._request("GET", f"/markets/{ticker}/orderbook", params=params, authenticated=self._auth is not None)
         return self._parse_orderbook(ticker, data)
+
+    async def get_orderbooks_batch(
+        self, tickers: list[str], depth: int = 10,
+    ) -> dict[str, OrderBook]:
+        """Fetch orderbooks for multiple markets at once (up to 100).
+
+        GET /markets/orderbooks?tickers=X&tickers=Y
+        Returns dict of ticker -> OrderBook.
+        """
+        results: dict[str, OrderBook] = {}
+        # API allows up to 100 tickers per request
+        for i in range(0, len(tickers), 100):
+            batch = tickers[i:i + 100]
+            # Build params with repeated tickers key
+            params_str = "&".join(f"tickers={t}" for t in batch)
+            if depth:
+                params_str += f"&depth={depth}"
+            data = await self._request(
+                "GET", f"/markets/orderbooks?{params_str}",
+                authenticated=self._auth is not None,
+            )
+            for ob_data in data.get("orderbooks", []):
+                ticker = ob_data.get("ticker", "")
+                if ticker:
+                    results[ticker] = self._parse_orderbook(ticker, ob_data)
+        return results
+
+    async def get_series(
+        self, limit: int = 1000, cursor: str | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """Fetch series list. Returns (series, next_cursor)."""
+        params: dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        data = await self._request(
+            "GET", "/series", params=params,
+            authenticated=self._auth is not None,
+        )
+        return data.get("series", []), data.get("cursor") or None
 
     async def get_trades(self, ticker: str | None = None, limit: int = 100) -> list[dict]:
         """Fetch recent trades."""

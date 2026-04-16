@@ -15,9 +15,10 @@ engine:
   tick_interval: 1.0
   markets: []
   market_filter:
-    min_volume: 100
-    min_open_interest: 50
-    max_days_to_close: 30
+    min_volume: 0
+    min_open_interest: 0
+    max_days_to_close: 365
+    prefer_short_term: true
     status: "open"
 
 strategies:
