@@ -44,9 +44,17 @@ class TradingEngine:
 
         # State
         self._running = False
+        self._simulated = False
         self._market_snapshots: dict[str, MarketSnapshot] = {}
         self._active_tickers: list[str] = []
         self._tasks: list[asyncio.Task] = []
+
+        # Paper trading state
+        self._paper_orders: list[dict] = []  # pending paper orders
+        self._paper_positions: dict[str, int] = {}  # ticker -> net contracts
+        self._paper_pnl: int = 0  # realized P&L in cents
+        self._paper_fills: int = 0  # total fill count
+        self._paper_order_counter: int = 0
 
     async def start(self) -> None:
         """Full startup sequence."""
@@ -84,6 +92,7 @@ class TradingEngine:
         await self._rest.start()
 
         # 4. Try to verify connectivity with authenticated balance call
+        self._simulated = False
         try:
             balance = await self._rest.get_balance()
             self._log.info(
@@ -95,6 +104,7 @@ class TradingEngine:
             self._log.warning("balance_fetch_failed", error=str(e), msg="Running with simulated balance")
             from kalshi_bot.models.portfolio import Balance as BalanceModel
             balance = BalanceModel(available_balance=100_000, portfolio_value=100_000)
+            self._simulated = True
 
         # 5. Risk manager
         self._risk = RiskManager(self._config.risk)
@@ -107,10 +117,16 @@ class TradingEngine:
 
         # 6. Portfolio tracker
         self._portfolio = PortfolioTracker(self._rest, self._risk, self._db)
-        try:
-            await self._portfolio.sync()
-        except Exception:
-            self._log.warning("portfolio_sync_skipped", msg="Using simulated portfolio")
+        if self._simulated:
+            # Set simulated balance directly so dashboard reflects it
+            self._portfolio._balance = balance
+            self._log.info("portfolio_simulated", balance=balance.available_dollars)
+        else:
+            try:
+                await self._portfolio.sync()
+            except Exception:
+                self._log.warning("portfolio_sync_skipped", msg="Using simulated portfolio")
+                self._portfolio._balance = balance
 
         # 7. Discover markets (uses public endpoints — no auth needed)
         self._active_tickers = await self._discover_markets()
@@ -143,7 +159,16 @@ class TradingEngine:
         # 10. Initialize strategies
         await self._init_strategies()
 
-        # 11. Start main loop + periodic tasks
+        # 11. Record initial PnL snapshot
+        bal = self._portfolio.balance
+        await self._db.record_pnl_snapshot(
+            balance=bal.available_balance,
+            portfolio_value=bal.portfolio_value,
+            realized_pnl=0,
+            total_positions=0,
+        )
+
+        # 12. Start main loop + periodic tasks
         self._running = True
         self._tasks = [
             asyncio.create_task(self._main_loop(), name="main_loop"),
@@ -247,6 +272,10 @@ class TradingEngine:
                             error=str(e),
                         )
 
+            # Check paper fills after processing all tickers
+            if self._dry_run and self._paper_orders:
+                await self._check_paper_fills()
+
             elapsed = time.monotonic() - tick_start
             sleep_time = max(0, tick_interval - elapsed)
             await asyncio.sleep(sleep_time)
@@ -283,15 +312,43 @@ class TradingEngine:
                 req.count = check.adjusted_size
 
             if self._dry_run:
+                self._paper_order_counter += 1
+                paper_id = f"paper-{self._paper_order_counter:06d}"
+                price = req.yes_price or req.no_price
                 self._log.info(
                     "dry_run_order",
                     strategy=strategy.name,
                     ticker=req.ticker,
                     action=req.action.value,
                     side=req.side.value,
-                    price=req.yes_price or req.no_price,
+                    price=price,
                     count=req.count,
+                    paper_id=paper_id,
                 )
+                paper_order = {
+                    "order_id": paper_id,
+                    "ticker": req.ticker,
+                    "action": req.action.value,
+                    "side": req.side.value,
+                    "price": price,
+                    "count": req.count,
+                    "strategy": strategy.name,
+                    "placed_at": time.time(),
+                }
+                self._paper_orders.append(paper_order)
+                # Record in DB so dashboard can see it
+                await self._db.record_order({
+                    "order_id": paper_id,
+                    "client_order_id": "",
+                    "ticker": req.ticker,
+                    "action": req.action.value,
+                    "side": req.side.value,
+                    "type": "limit",
+                    "price": price,
+                    "count": req.count,
+                    "status": "resting",
+                    "strategy_name": strategy.name,
+                })
                 continue
 
             try:
@@ -496,6 +553,10 @@ class TradingEngine:
             await asyncio.sleep(60)
             if not self._running:
                 break
+            if self._simulated:
+                # In simulated mode, don't try API sync — just update paper P&L
+                await self._update_paper_pnl()
+                continue
             try:
                 await self._portfolio.sync()
                 # Update value strategy capital
@@ -535,10 +596,25 @@ class TradingEngine:
             await asyncio.sleep(30)
             if not self._running:
                 break
+
+            # Update paper P&L before logging
+            if self._dry_run and self._simulated:
+                await self._update_paper_pnl()
+
             risk_status = self._risk.get_status()
+            paper_info = {}
+            if self._dry_run:
+                active_paper = {t: p for t, p in self._paper_positions.items() if p != 0}
+                paper_info = {
+                    "paper_pnl_cents": self._paper_pnl,
+                    "paper_fills": self._paper_fills,
+                    "paper_positions": active_paper,
+                    "pending_paper_orders": len(self._paper_orders),
+                }
             self._log.info(
                 "status",
                 **risk_status,
+                **paper_info,
                 active_markets=len(self._active_tickers),
                 strategies=[s.name for s in self._strategies],
                 dry_run=self._dry_run,
@@ -546,14 +622,155 @@ class TradingEngine:
             # Record PnL snapshot
             try:
                 bal = self._portfolio.balance
+                total_pos = len(self._paper_positions) if self._dry_run else len(self._portfolio._positions)
                 await self._db.record_pnl_snapshot(
                     balance=bal.available_balance,
                     portfolio_value=bal.portfolio_value,
-                    realized_pnl=0,
-                    total_positions=len(self._portfolio._positions),
+                    realized_pnl=self._paper_pnl if self._dry_run else 0,
+                    total_positions=total_pos,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                self._log.warning("pnl_snapshot_error", error=str(e))
+
+    # ─── Paper Trading Simulation ───────────────────────────────────
+
+    async def _check_paper_fills(self) -> None:
+        """Check if any paper orders would have been filled by current market prices."""
+        filled_indices = []
+        for i, order in enumerate(self._paper_orders):
+            ticker = order["ticker"]
+            snapshot = self._market_snapshots.get(ticker)
+            if not snapshot or not snapshot.orderbook:
+                continue
+
+            ob = snapshot.orderbook
+            price = order["price"]
+            action = order["action"]
+            side = order["side"]
+
+            # Check if market has crossed our price
+            filled = False
+            if action == "buy":
+                # Buy order fills when best ask <= our bid price
+                if side == "yes" and ob.best_ask and ob.best_ask <= price:
+                    filled = True
+                elif side == "no":
+                    # No-side buy: fills when best yes bid implies no-ask <= our price
+                    no_ask = 100 - ob.best_bid if ob.best_bid else None
+                    if no_ask and no_ask <= price:
+                        filled = True
+            else:  # sell
+                # Sell order fills when best bid >= our ask price
+                if side == "yes" and ob.best_bid and ob.best_bid >= price:
+                    filled = True
+                elif side == "no":
+                    no_bid = 100 - ob.best_ask if ob.best_ask else None
+                    if no_bid and no_bid >= price:
+                        filled = True
+
+            if filled:
+                filled_indices.append(i)
+                count = order["count"]
+
+                # Update paper positions
+                if action == "buy":
+                    delta = count if side == "yes" else -count
+                else:
+                    delta = -count if side == "yes" else count
+                self._paper_positions[ticker] = self._paper_positions.get(ticker, 0) + delta
+
+                # Track cost (negative for buys, positive for sells)
+                cost_cents = price * count
+                if action == "buy":
+                    self._paper_pnl -= cost_cents
+                else:
+                    self._paper_pnl += cost_cents
+                self._paper_fills += 1
+
+                fill_id = f"paper-fill-{self._paper_fills:06d}"
+                self._log.info(
+                    "paper_fill",
+                    ticker=ticker,
+                    action=action,
+                    side=side,
+                    price=price,
+                    count=count,
+                    net_position=self._paper_positions[ticker],
+                    paper_pnl_cents=self._paper_pnl,
+                )
+
+                # Record fill in DB
+                await self._db.record_fill({
+                    "trade_id": fill_id,
+                    "order_id": order["order_id"],
+                    "ticker": ticker,
+                    "action": action,
+                    "side": side,
+                    "count": count,
+                    "price": price,
+                })
+
+                # Update order status in DB
+                await self._db.update_order_status(order["order_id"], "executed")
+
+                # Notify strategies
+                fill = Fill(
+                    trade_id=fill_id,
+                    order_id=order["order_id"],
+                    ticker=ticker,
+                    action=OrderAction(action),
+                    side=Side(side),
+                    count=count,
+                    yes_price=price if side == "yes" else 0,
+                    no_price=price if side == "no" else 0,
+                )
+                for strategy in self._strategies:
+                    if ticker in strategy._active_tickers:
+                        try:
+                            await strategy.on_fill(fill)
+                        except Exception:
+                            pass
+
+        # Remove filled orders (reverse order to preserve indices)
+        for i in reversed(filled_indices):
+            self._paper_orders.pop(i)
+
+        # Expire old paper orders (older than 2 minutes)
+        now = time.time()
+        expired = [o for o in self._paper_orders if now - o["placed_at"] > 120]
+        for o in expired:
+            self._paper_orders.remove(o)
+            await self._db.update_order_status(o["order_id"], "canceled")
+
+    async def _update_paper_pnl(self) -> None:
+        """Compute current paper portfolio value and record snapshot."""
+        base_balance = 100_000  # $1,000 starting
+        # Mark-to-market open positions
+        unrealized = 0
+        for ticker, pos in self._paper_positions.items():
+            if pos == 0:
+                continue
+            snapshot = self._market_snapshots.get(ticker)
+            if snapshot and snapshot.orderbook:
+                mid = snapshot.orderbook.mid_price
+                if mid:
+                    # Value of position: pos * mid_price (if long yes, mid is value)
+                    unrealized += pos * mid
+
+        total_value = base_balance + self._paper_pnl + unrealized
+        self._portfolio._balance.available_balance = total_value
+        self._portfolio._balance.portfolio_value = total_value
+
+        self._risk.update_balance(total_value)
+
+        self._log.debug(
+            "paper_pnl_update",
+            base=base_balance,
+            realized_pnl=self._paper_pnl,
+            unrealized=unrealized,
+            total_value=total_value,
+            positions=dict(self._paper_positions),
+        )
 
     # ─── Save/Load Strategy State ─────────────────────────────────
 

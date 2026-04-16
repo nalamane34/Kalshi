@@ -396,7 +396,7 @@ DASHBOARD_HTML = """
             ddEl.className = 'card-value ' + (data.drawdown_pct > 10 ? 'negative' : data.drawdown_pct > 5 ? 'neutral' : 'positive');
 
             document.getElementById('openOrders').textContent = data.open_orders;
-            document.getElementById('activeMarkets').textContent = 'Markets: ' + data.active_markets;
+            document.getElementById('activeMarkets').textContent = 'Markets: ' + data.active_markets + ' | Fills: ' + (data.total_fills || 0);
 
             // Risk bars
             let dlPct = Math.min(Math.abs(data.daily_pnl_pct) / data.daily_loss_limit * 100, 100);
@@ -559,9 +559,51 @@ def query_status():
             except (json.JSONDecodeError, KeyError):
                 pass
 
+        # Paper positions from fills
+        fill_rows = db.execute(
+            "SELECT ticker, action, side, count, price FROM fills ORDER BY created_at"
+        ).fetchall()
+        paper_positions = {}
+        realized_pnl = 0
+        for f in fill_rows:
+            ticker = f["ticker"]
+            action = f["action"]
+            side = f["side"]
+            count = f["count"]
+            price = f["price"]
+            if action == "buy":
+                delta = count if side == "yes" else -count
+                realized_pnl -= price * count
+            else:
+                delta = -count if side == "yes" else count
+                realized_pnl += price * count
+            paper_positions[ticker] = paper_positions.get(ticker, 0) + delta
+
+        # Merge positions
+        for ticker, pos in paper_positions.items():
+            if pos != 0:
+                positions[ticker] = pos
+                positions_detail.append({
+                    "ticker": ticker,
+                    "position": pos,
+                    "market_exposure": abs(pos) * 50,  # estimated mid
+                    "realized_pnl": 0,
+                    "fees_paid": 0,
+                })
+
         # Open orders count
         open_count = db.execute(
             "SELECT COUNT(*) as cnt FROM orders WHERE status = 'resting'"
+        ).fetchone()["cnt"]
+
+        # Distinct markets with activity
+        active_markets = db.execute(
+            "SELECT COUNT(DISTINCT ticker) as cnt FROM orders"
+        ).fetchone()["cnt"]
+
+        # Total fills
+        total_fills = db.execute(
+            "SELECT COUNT(*) as cnt FROM fills"
         ).fetchone()["cnt"]
 
         return {
@@ -571,7 +613,8 @@ def query_status():
             "daily_pnl_pct": round(daily_pnl_pct, 2),
             "drawdown_pct": round(drawdown_pct, 2),
             "open_orders": open_count,
-            "active_markets": total_positions,
+            "active_markets": active_markets,
+            "total_fills": total_fills,
             "positions": positions,
             "positions_detail": positions_detail,
             "halted": False,
