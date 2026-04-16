@@ -1,12 +1,12 @@
-"""Dashboard generator for the Kalshi trading bot.
+"""Dashboard for the Kalshi trading bot.
 
-Reads from the bot's SQLite database and generates a self-contained
-dashboard.html file that can be opened directly in any browser.
+Reads from the bot's SQLite database and serves a live web dashboard.
 
 Usage:
+    python dashboard.py --serve            # Live server on port 8080
+    python dashboard.py --serve --port 5000  # Custom port
     python dashboard.py                    # One-shot: generate dashboard.html
     python dashboard.py --watch            # Continuous: regenerate every 10s
-    python dashboard.py --watch --interval 5  # Custom interval
 """
 
 from __future__ import annotations
@@ -614,11 +614,197 @@ def generate_html(data: dict) -> str:
 </html>"""
 
 
+def generate_live_html() -> str:
+    """Generate HTML that fetches from /api endpoints instead of embedded data."""
+    return LIVE_DASHBOARD_HTML
+
+
+# Live dashboard HTML that fetches from Flask API endpoints
+LIVE_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kalshi Bot Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            background: #0a0e17;
+            color: #e0e6f0;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #1a1f35 0%, #0d1220 100%);
+            border-bottom: 1px solid #2a3050;
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { font-size: 18px; font-weight: 600; color: #7eb8ff; }
+        .header .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #34d399; animation: pulse 2s infinite;
+        }
+        .status-dot.halted { background: #ef4444; animation: none; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 20px 24px; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 16px; }
+        .card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #6b7280; margin-bottom: 8px; }
+        .card-value { font-size: 28px; font-weight: 700; }
+        .card-value.positive { color: #34d399; }
+        .card-value.negative { color: #ef4444; }
+        .card-value.neutral { color: #7eb8ff; }
+        .card-sub { font-size: 12px; color: #6b7280; margin-top: 4px; }
+        .section { padding: 0 24px 20px; }
+        .section-title { font-size: 14px; font-weight: 600; color: #9ca3af; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #1f2937; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; padding: 8px 12px; color: #6b7280; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #1f2937; }
+        td { padding: 8px 12px; border-bottom: 1px solid #111827; }
+        tr:hover { background: #1a1f35; }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .tag-buy { background: #064e3b; color: #34d399; }
+        .tag-sell { background: #7f1d1d; color: #fca5a5; }
+        .tag-yes { background: #1e3a5f; color: #7eb8ff; }
+        .tag-no { background: #3b1f4a; color: #c084fc; }
+        .tag-resting { background: #1f2937; color: #9ca3af; }
+        .tag-executed { background: #064e3b; color: #34d399; }
+        .tag-canceled { background: #7f1d1d; color: #fca5a5; }
+        .pnl-chart { background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 16px; height: 200px; position: relative; overflow: hidden; }
+        .chart-canvas { width: 100%; height: 100%; }
+        .risk-bar { height: 6px; background: #1f2937; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+        .risk-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+        .risk-fill.safe { background: #34d399; }
+        .risk-fill.warning { background: #fbbf24; }
+        .risk-fill.danger { background: #ef4444; }
+        .auto-refresh { color: #4b5563; font-size: 12px; }
+        .empty-state { text-align: center; padding: 40px; color: #4b5563; }
+        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>KALSHI BOT</h1>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Connecting...</span>
+            <span class="auto-refresh">Auto-refresh: 5s</span>
+        </div>
+    </div>
+    <div class="grid">
+        <div class="card"><div class="card-title">Balance</div><div class="card-value neutral" id="balance">--</div><div class="card-sub" id="portfolioValue">Portfolio: --</div></div>
+        <div class="card"><div class="card-title">Daily P&L</div><div class="card-value" id="dailyPnl">--</div><div class="card-sub" id="dailyPnlPct">--%</div></div>
+        <div class="card"><div class="card-title">Drawdown</div><div class="card-value" id="drawdown">--</div><div class="card-sub" id="drawdownLimit">Limit: 15%</div></div>
+        <div class="card"><div class="card-title">Open Orders</div><div class="card-value neutral" id="openOrders">--</div><div class="card-sub" id="activeMarkets">Markets: --</div></div>
+    </div>
+    <div class="section">
+        <div class="section-title">Risk Gauges</div>
+        <div class="card" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px;">
+            <div><div class="card-title">Daily Loss</div><div class="risk-bar"><div class="risk-fill safe" id="dailyLossBar" style="width:0%"></div></div><div class="card-sub" id="dailyLossText">0% / 5%</div></div>
+            <div><div class="card-title">Max Drawdown</div><div class="risk-bar"><div class="risk-fill safe" id="drawdownBar" style="width:0%"></div></div><div class="card-sub" id="drawdownText">0% / 15%</div></div>
+            <div><div class="card-title">Position Usage</div><div class="risk-bar"><div class="risk-fill safe" id="positionBar" style="width:0%"></div></div><div class="card-sub" id="positionText">0 / 50</div></div>
+        </div>
+    </div>
+    <div class="section"><div class="section-title">P&L Over Time</div><div class="pnl-chart"><canvas id="pnlChart" class="chart-canvas"></canvas></div></div>
+    <div class="section"><div class="section-title">Positions</div><div class="card" style="padding:0; overflow: auto; max-height: 300px;"><table><thead><tr><th>Ticker</th><th>Position</th><th>Exposure</th><th>P&L</th><th>Fees</th></tr></thead><tbody id="positionsTable"><tr><td colspan="5" class="empty-state">No positions</td></tr></tbody></table></div></div>
+    <div class="section"><div class="section-title">Recent Orders</div><div class="card" style="padding:0; overflow: auto; max-height: 300px;"><table><thead><tr><th>Time</th><th>Ticker</th><th>Action</th><th>Side</th><th>Price</th><th>Count</th><th>Status</th><th>Strategy</th></tr></thead><tbody id="ordersTable"><tr><td colspan="8" class="empty-state">No orders yet</td></tr></tbody></table></div></div>
+    <div class="section"><div class="section-title">Recent Fills</div><div class="card" style="padding:0; overflow: auto; max-height: 300px;"><table><thead><tr><th>Time</th><th>Ticker</th><th>Action</th><th>Side</th><th>Price</th><th>Count</th></tr></thead><tbody id="fillsTable"><tr><td colspan="6" class="empty-state">No fills yet</td></tr></tbody></table></div></div>
+    <script>
+    function fmt$(cents) { if (cents == null) return '--'; return '$' + (cents / 100).toFixed(2); }
+    function fmtPct(val) { if (val == null) return '--%'; return val.toFixed(2) + '%'; }
+    function riskClass(pct, limit) { let r = Math.abs(pct) / limit; if (r > 0.8) return 'danger'; if (r > 0.5) return 'warning'; return 'safe'; }
+    let pnlHistory = [];
+    function drawChart(canvas, data) {
+        let ctx = canvas.getContext('2d');
+        let w = canvas.width = canvas.parentElement.clientWidth - 32;
+        let h = canvas.height = canvas.parentElement.clientHeight - 32;
+        ctx.clearRect(0, 0, w, h);
+        if (data.length < 2) { ctx.fillStyle = '#4b5563'; ctx.font = '13px monospace'; ctx.textAlign = 'center'; ctx.fillText('Collecting data...', w/2, h/2); return; }
+        let values = data.map(d => d.balance), min = Math.min(...values), max = Math.max(...values), range = max - min || 1;
+        ctx.strokeStyle = '#1f2937'; ctx.lineWidth = 1;
+        for (let i = 0; i < 5; i++) { let y = h * i / 4; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+        ctx.beginPath(); ctx.strokeStyle = values[values.length-1] >= values[0] ? '#34d399' : '#ef4444'; ctx.lineWidth = 2;
+        for (let i = 0; i < values.length; i++) { let x = (i / (values.length - 1)) * w, y = h - ((values[i] - min) / range) * h * 0.9 - h * 0.05; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+        ctx.stroke(); ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+        let grad = ctx.createLinearGradient(0, 0, 0, h), color = values[values.length-1] >= values[0] ? '52, 211, 153' : '239, 68, 68';
+        grad.addColorStop(0, `rgba(${color}, 0.15)`); grad.addColorStop(1, `rgba(${color}, 0.0)`);
+        ctx.fillStyle = grad; ctx.fill();
+        ctx.fillStyle = '#6b7280'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+        ctx.fillText(fmt$(max), 4, 14); ctx.fillText(fmt$(min), 4, h - 4);
+    }
+    async function refresh() {
+        try {
+            let data = (await (await fetch('/api/data')).json());
+            let s = data.status, orders = data.orders, fills = data.fills;
+            let dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
+            if (s.halted) { dot.className = 'status-dot halted'; text.textContent = 'HALTED: ' + s.halt_reason; }
+            else { dot.className = 'status-dot'; text.textContent = 'Running' + (s.dry_run ? ' (DRY RUN / PAPER)' : ''); }
+            document.getElementById('balance').textContent = fmt$(s.balance);
+            document.getElementById('portfolioValue').textContent = 'Portfolio: ' + fmt$(s.portfolio_value);
+            let pnl = s.balance - s.starting_balance, pnlEl = document.getElementById('dailyPnl');
+            pnlEl.textContent = fmt$(pnl); pnlEl.className = 'card-value ' + (pnl >= 0 ? 'positive' : 'negative');
+            document.getElementById('dailyPnlPct').textContent = fmtPct(s.daily_pnl_pct);
+            let ddEl = document.getElementById('drawdown'); ddEl.textContent = fmtPct(s.drawdown_pct);
+            ddEl.className = 'card-value ' + (s.drawdown_pct > 10 ? 'negative' : s.drawdown_pct > 5 ? 'neutral' : 'positive');
+            document.getElementById('openOrders').textContent = s.open_orders;
+            document.getElementById('activeMarkets').textContent = 'Markets: ' + s.active_markets + ' | Fills: ' + (s.total_fills || 0);
+            let dlPct = Math.min(Math.abs(s.daily_pnl_pct) / s.daily_loss_limit * 100, 100);
+            let dlBar = document.getElementById('dailyLossBar'); dlBar.style.width = dlPct + '%'; dlBar.className = 'risk-fill ' + riskClass(s.daily_pnl_pct, s.daily_loss_limit);
+            document.getElementById('dailyLossText').textContent = Math.abs(s.daily_pnl_pct).toFixed(1) + '% / ' + s.daily_loss_limit + '%';
+            let ddPctBar = Math.min(s.drawdown_pct / s.max_drawdown * 100, 100);
+            let ddBar = document.getElementById('drawdownBar'); ddBar.style.width = ddPctBar + '%'; ddBar.className = 'risk-fill ' + riskClass(s.drawdown_pct, s.max_drawdown);
+            document.getElementById('drawdownText').textContent = s.drawdown_pct.toFixed(1) + '% / ' + s.max_drawdown + '%';
+            let posCount = Object.keys(s.positions || {}).filter(k => s.positions[k] !== 0).length;
+            let posBar = document.getElementById('positionBar'); posBar.style.width = Math.min(posCount / 50 * 100, 100) + '%'; posBar.className = 'risk-fill ' + riskClass(posCount, 50);
+            document.getElementById('positionText').textContent = posCount + ' / 50';
+            let posTbody = document.getElementById('positionsTable'), positions = s.positions_detail || [];
+            posTbody.innerHTML = positions.length === 0 ? '<tr><td colspan="5" class="empty-state">No positions</td></tr>' :
+                positions.map(p => `<tr><td>${p.ticker}</td><td style="color:${p.position > 0 ? '#34d399' : p.position < 0 ? '#ef4444' : '#6b7280'}">${p.position}</td><td>${fmt$(p.market_exposure)}</td><td style="color:${p.realized_pnl >= 0 ? '#34d399' : '#ef4444'}">${fmt$(p.realized_pnl)}</td><td>${fmt$(p.fees_paid)}</td></tr>`).join('');
+            pnlHistory = s.pnl_history || []; drawChart(document.getElementById('pnlChart'), pnlHistory);
+            let ordTbody = document.getElementById('ordersTable');
+            ordTbody.innerHTML = orders.length === 0 ? '<tr><td colspan="8" class="empty-state">No orders yet</td></tr>' :
+                orders.map(o => `<tr><td>${o.created_at ? o.created_at.slice(11,19) : '--'}</td><td>${o.ticker}</td><td><span class="tag tag-${o.action}">${o.action.toUpperCase()}</span></td><td><span class="tag tag-${o.side}">${o.side.toUpperCase()}</span></td><td>${o.price}&#162;</td><td>${o.count}</td><td><span class="tag tag-${o.status}">${o.status}</span></td><td>${o.strategy_name || '-'}</td></tr>`).join('');
+            let fillTbody = document.getElementById('fillsTable');
+            fillTbody.innerHTML = fills.length === 0 ? '<tr><td colspan="6" class="empty-state">No fills yet</td></tr>' :
+                fills.map(f => `<tr><td>${f.created_at ? f.created_at.slice(11,19) : '--'}</td><td>${f.ticker}</td><td><span class="tag tag-${f.action}">${f.action.toUpperCase()}</span></td><td><span class="tag tag-${f.side}">${f.side.toUpperCase()}</span></td><td>${f.price}&#162;</td><td>${f.count}</td></tr>`).join('');
+        } catch(e) { document.getElementById('statusText').textContent = 'Connection error'; document.getElementById('statusDot').className = 'status-dot halted'; }
+    }
+    setInterval(refresh, 5000); refresh();
+    window.addEventListener('resize', () => drawChart(document.getElementById('pnlChart'), pnlHistory));
+    </script>
+</body>
+</html>"""
+
+
+def run_server(host: str, port: int):
+    """Run Flask live dashboard server."""
+    from flask import Flask, jsonify
+
+    app = Flask(__name__)
+
+    @app.route("/")
+    def index():
+        return generate_live_html()
+
+    @app.route("/api/data")
+    def api_data():
+        return jsonify(query_all())
+
+    print(f"Dashboard server starting at http://{host}:{port}")
+    print(f"Reading from database: {DB_PATH}")
+    app.run(host=host, port=port, debug=False)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Kalshi Bot Dashboard Generator")
+    parser = argparse.ArgumentParser(description="Kalshi Bot Dashboard")
     parser.add_argument("--db", default="kalshi_bot.db", help="Database path")
+    parser.add_argument("--serve", "-s", action="store_true", help="Run live web server")
+    parser.add_argument("--port", type=int, default=8080, help="Server port (with --serve)")
+    parser.add_argument("--host", default="0.0.0.0", help="Server host (with --serve)")
     parser.add_argument("--output", "-o", default="dashboard.html", help="Output HTML file")
-    parser.add_argument("--watch", "-w", action="store_true", help="Continuously regenerate")
+    parser.add_argument("--watch", "-w", action="store_true", help="Continuously regenerate HTML file")
     parser.add_argument("--interval", type=int, default=10, help="Regeneration interval in seconds (with --watch)")
     args = parser.parse_args()
 
@@ -626,7 +812,9 @@ def main():
     DB_PATH = args.db
     OUTPUT_PATH = args.output
 
-    if args.watch:
+    if args.serve:
+        run_server(args.host, args.port)
+    elif args.watch:
         print(f"Watching database: {DB_PATH}")
         print(f"Regenerating {OUTPUT_PATH} every {args.interval}s (Ctrl+C to stop)")
         while True:
