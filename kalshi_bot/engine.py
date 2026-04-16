@@ -387,16 +387,12 @@ class TradingEngine:
     # ─── Market Discovery ─────────────────────────────────────────
 
     async def _discover_markets(self) -> list[str]:
-        """Discover tradeable markets using two strategies:
+        """Discover tradeable markets closing within 72 hours.
 
-        1. Series-based: find short-term series (sports, weather, etc.)
-           and fetch their active markets closing within 72h. Uses
-           max_close_ts for API-level filtering and batch orderbook
-           endpoint for fast liquidity checks.
-        2. Event-based: fetch event markets for longer-dated predictions.
-
-        Prioritizes markets closing within 72 hours with real orderbook
-        liquidity (sports games, weather, econ).
+        Uses max_close_ts to fetch ALL open markets closing soon (sports,
+        weather, econ, etc.), then batch-probes orderbooks to find the
+        most liquid ones. No need to iterate series — the API handles
+        time filtering directly.
         """
         configured = self._config.engine.markets
         if configured:
@@ -407,75 +403,54 @@ class TradingEngine:
         max_close_ts = int(cutoff_72h.timestamp())
         min_close_ts = int(now.timestamp())
 
-        # ── Strategy 1: Short-term series (sports, weather, econ) ──
-        self._log.info("discovering_series")
-        short_term_tickers: list[str] = []
-        try:
-            all_series, _ = await self._rest.get_series(limit=1000)
-            # Filter for categories with short-term markets
-            target_cats = {
-                "Sports", "Climate and Weather", "Economics",
-                "Financials", "Transportation", "Politics",
-            }
-            target_freqs = {"daily", "custom", "one_off", "weekly"}
-            target_series = [
-                s["ticker"] for s in all_series
-                if s.get("category") in target_cats
-                and s.get("frequency") in target_freqs
-            ]
-            self._log.info("target_series", count=len(target_series))
+        # ── Fetch all open markets closing within 72h (exclude MVE bundles) ──
+        self._log.info("discovering_markets_72h")
+        all_short: list[tuple[str, str]] = []  # (ticker, title)
+        cursor = None
+        for page in range(3):  # Up to 3000 markets
+            markets, cursor = await self._rest.get_markets(
+                limit=1000, status="open",
+                max_close_ts=max_close_ts,
+                min_close_ts=min_close_ts,
+                cursor=cursor,
+                mve_filter="exclude",
+            )
+            for m in markets:
+                all_short.append((m.ticker, m.title or ""))
+            self._log.info("discovery_page", page=page + 1, markets=len(markets), total=len(all_short))
+            if not cursor or not markets:
+                break
 
-            # Fetch markets for target series, using max_close_ts
-            # to only get markets closing within 72h
-            for i in range(0, min(len(target_series), 80), 5):
-                batch = target_series[i:i + 5]
-                tasks = [
-                    self._rest.get_markets(
-                        limit=50,
-                        series_ticker=st,
-                        status="open",
-                        max_close_ts=max_close_ts,
-                        min_close_ts=min_close_ts,
-                    )
-                    for st in batch
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        continue
-                    markets, _ = result
-                    for m in markets:
-                        short_term_tickers.append(m.ticker)
-        except Exception as e:
-            self._log.warning("series_discovery_failed", error=str(e))
+        self._log.info("short_term_candidates", count=len(all_short))
+        filtered = all_short  # Already filtered by mve_filter=exclude
 
-        self._log.info("short_term_candidates", count=len(short_term_tickers))
+        # ── Batch-probe orderbooks to find liquid markets ──
+        tickers_to_probe = [t for t, _ in filtered[:500]]
+        liquid: list[tuple[int, int, str, str]] = []  # (depth, -spread, ticker, title)
 
-        # Batch-probe orderbooks for all short-term candidates at once
-        liquid_short: list[tuple[int, str]] = []
-        if short_term_tickers:
+        if tickers_to_probe:
             try:
-                # Batch endpoint handles up to 100 tickers per call
                 ob_map = await self._rest.get_orderbooks_batch(
-                    short_term_tickers[:200], depth=5,
+                    tickers_to_probe, depth=5,
                 )
                 for ticker, ob in ob_map.items():
-                    if ob.best_bid is not None or ob.best_ask is not None:
+                    has_bid = ob.best_bid is not None
+                    has_ask = ob.best_ask is not None
+                    if has_bid or has_ask:
                         depth = len(ob.yes_bids) + len(ob.yes_asks)
-                        liquid_short.append((depth, ticker))
-                        self._log.info(
-                            "short_term_liquid",
-                            ticker=ticker,
-                            bid=ob.best_bid,
-                            ask=ob.best_ask,
-                            depth=depth,
-                        )
+                        spread = 99
+                        if has_bid and has_ask:
+                            spread = ob.best_ask - ob.best_bid
+                            # Prefer tight spreads (tradeable)
+                            if spread <= 15:
+                                depth += 50  # bonus for tight spread
+                        title = next((ti for t, ti in filtered if t == ticker), "")
+                        liquid.append((depth, -spread, ticker, title))
             except Exception as e:
                 self._log.warning("batch_orderbook_failed", error=str(e),
                                   msg="Falling back to individual probes")
-                # Fallback: probe individually in batches of 5
-                for i in range(0, min(len(short_term_tickers), 40), 5):
-                    batch = short_term_tickers[i:i + 5]
+                for i in range(0, min(len(tickers_to_probe), 50), 5):
+                    batch = tickers_to_probe[i:i + 5]
                     tasks = [self._rest.get_orderbook(t, depth=5) for t in batch]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     for ticker, result in zip(batch, results):
@@ -483,55 +458,64 @@ class TradingEngine:
                             continue
                         if result.best_bid is not None or result.best_ask is not None:
                             depth = len(result.yes_bids) + len(result.yes_asks)
-                            liquid_short.append((depth, ticker))
+                            title = next((ti for t, ti in filtered if t == ticker), "")
+                            liquid.append((depth, 0, ticker, title))
 
-        liquid_short.sort(key=lambda x: -x[0])
-        short_picks = [t for _, t in liquid_short[:20]]
-        self._log.info("short_term_liquid_picks", count=len(short_picks))
+        liquid.sort(key=lambda x: (-x[0], x[1]))
+        short_picks = [t for _, _, t, _ in liquid[:25]]
 
-        # ── Strategy 2: Event-based (broader market discovery) ──
-        all_event_tickers = await self._rest.get_event_tickers(
-            limit=200, status="open", max_pages=1,
-        )
-        self._log.info("discovered_events", count=len(all_event_tickers))
+        for depth, neg_spread, ticker, title in liquid[:10]:
+            self._log.info(
+                "liquid_market",
+                ticker=ticker,
+                title=title[:50],
+                depth=depth,
+                spread=-neg_spread,
+            )
 
-        all_markets = []
-        for i in range(0, min(len(all_event_tickers), 100), 5):
-            batch = all_event_tickers[i:i + 5]
-            tasks = [
-                self._rest.get_markets(limit=50, event_ticker=et)
-                for et in batch
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    continue
-                markets, _ = result
-                all_markets.extend(markets)
+        self._log.info("liquid_picks", count=len(short_picks))
 
-        self._log.info("event_markets_fetched", count=len(all_markets))
+        # ── Fallback: event-based for broader coverage ──
+        event_picks: list[str] = []
+        if len(short_picks) < 30:
+            all_event_tickers = await self._rest.get_event_tickers(
+                limit=200, status="open", max_pages=1,
+            )
+            self._log.info("discovered_events", count=len(all_event_tickers))
 
-        # Score event markets by liquidity and time to close
-        scored = []
-        for m in all_markets:
-            if m.close_time:
-                days_left = (m.close_time - now).total_seconds() / 86400
-                if days_left < 0:
-                    continue
-            else:
-                days_left = 999
+            all_markets = []
+            for i in range(0, min(len(all_event_tickers), 50), 5):
+                batch = all_event_tickers[i:i + 5]
+                tasks = [
+                    self._rest.get_markets(limit=50, event_ticker=et)
+                    for et in batch
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    markets, _ = result
+                    all_markets.extend(markets)
 
-            has_book = 1 if (m.yes_bid > 0 and m.yes_ask > 0) else 0
-            spread = (m.yes_ask - m.yes_bid) if has_book else 99
-            time_score = max(0, 100 - days_left)
-            vol_score = min(m.volume, 10000)
-            score = has_book * 100000 + time_score * 100 + vol_score
-            scored.append((score, spread, days_left, m))
+            scored = []
+            for m in all_markets:
+                if m.close_time:
+                    days_left = (m.close_time - now).total_seconds() / 86400
+                    if days_left < 0:
+                        continue
+                else:
+                    days_left = 999
+                has_book = 1 if (m.yes_bid > 0 and m.yes_ask > 0) else 0
+                spread = (m.yes_ask - m.yes_bid) if has_book else 99
+                time_score = max(0, 100 - days_left)
+                vol_score = min(m.volume, 10000)
+                score = has_book * 100000 + time_score * 100 + vol_score
+                scored.append((score, spread, days_left, m))
 
-        scored.sort(key=lambda x: (-x[0], x[1]))
-        event_picks = [m.ticker for _, _, _, m in scored[:20]]
+            scored.sort(key=lambda x: (-x[0], x[1]))
+            event_picks = [m.ticker for _, _, _, m in scored[:15]]
 
-        # ── Merge: short-term first, then event markets ──
+        # ── Merge: liquid short-term first, then event picks ──
         seen = set()
         final: list[str] = []
         for t in short_picks + event_picks:
@@ -541,20 +525,13 @@ class TradingEngine:
             if len(final) >= 30:
                 break
 
-        for t in short_picks[:5]:
-            self._log.info("selected_short_term", ticker=t)
-        for _, _, days, m in scored[:5]:
-            self._log.info(
-                "selected_event",
-                ticker=m.ticker,
-                days_to_close=round(days, 1),
-                bid=m.yes_bid,
-                ask=m.yes_ask,
-            )
+        if not final:
+            # Last resort: just grab whatever's available
+            for t, _ in filtered[:10]:
+                final.append(t)
 
-        if not final and all_markets:
-            final = [m.ticker for m in all_markets[:10]]
-
+        self._log.info("markets_discovered", count=len(final),
+                        tickers=final[:10])
         return final
 
     # ─── Strategy Initialization ──────────────────────────────────
