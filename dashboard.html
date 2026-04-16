@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kalshi Bot Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            background: #0a0e17;
+            color: #e0e6f0;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #1a1f35 0%, #0d1220 100%);
+            border-bottom: 1px solid #2a3050;
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #7eb8ff;
+        }
+        .header .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #34d399;
+            animation: pulse 2s infinite;
+        }
+        .status-dot.halted { background: #ef4444; animation: none; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            padding: 20px 24px;
+        }
+        .card {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .card-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #6b7280;
+            margin-bottom: 8px;
+        }
+        .card-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+        .card-value.positive { color: #34d399; }
+        .card-value.negative { color: #ef4444; }
+        .card-value.neutral { color: #7eb8ff; }
+        .card-sub {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+        .section {
+            padding: 0 24px 20px;
+        }
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #9ca3af;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #1f2937;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th {
+            text-align: left;
+            padding: 8px 12px;
+            color: #6b7280;
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #1f2937;
+        }
+        td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #111827;
+        }
+        tr:hover { background: #1a1f35; }
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .tag-buy { background: #064e3b; color: #34d399; }
+        .tag-sell { background: #7f1d1d; color: #fca5a5; }
+        .tag-yes { background: #1e3a5f; color: #7eb8ff; }
+        .tag-no { background: #3b1f4a; color: #c084fc; }
+        .tag-resting { background: #1f2937; color: #9ca3af; }
+        .tag-executed { background: #064e3b; color: #34d399; }
+        .tag-canceled { background: #7f1d1d; color: #fca5a5; }
+        .pnl-chart {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+            padding: 16px;
+            height: 200px;
+            position: relative;
+            overflow: hidden;
+        }
+        .chart-canvas { width: 100%; height: 100%; }
+        .risk-bar {
+            height: 6px;
+            background: #1f2937;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        .risk-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+        .risk-fill.safe { background: #34d399; }
+        .risk-fill.warning { background: #fbbf24; }
+        .risk-fill.danger { background: #ef4444; }
+        .generated-at { color: #4b5563; font-size: 12px; }
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #4b5563;
+        }
+        @media (max-width: 900px) {
+            .grid { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>KALSHI BOT</h1>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Loading...</span>
+            <span class="generated-at">Updated: 2026-04-16 01:02:53 UTC</span>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <div class="card-title">Balance</div>
+            <div class="card-value neutral" id="balance">--</div>
+            <div class="card-sub" id="portfolioValue">Portfolio: --</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Daily P&amp;L</div>
+            <div class="card-value" id="dailyPnl">--</div>
+            <div class="card-sub" id="dailyPnlPct">--%</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Drawdown</div>
+            <div class="card-value" id="drawdown">--</div>
+            <div class="card-sub" id="drawdownLimit">Limit: 15%</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Open Orders</div>
+            <div class="card-value neutral" id="openOrders">--</div>
+            <div class="card-sub" id="activeMarkets">Markets: --</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Risk Gauges</div>
+        <div class="card" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px;">
+            <div>
+                <div class="card-title">Daily Loss</div>
+                <div class="risk-bar"><div class="risk-fill safe" id="dailyLossBar" style="width:0%"></div></div>
+                <div class="card-sub" id="dailyLossText">0% / 5%</div>
+            </div>
+            <div>
+                <div class="card-title">Max Drawdown</div>
+                <div class="risk-bar"><div class="risk-fill safe" id="drawdownBar" style="width:0%"></div></div>
+                <div class="card-sub" id="drawdownText">0% / 15%</div>
+            </div>
+            <div>
+                <div class="card-title">Position Usage</div>
+                <div class="risk-bar"><div class="risk-fill safe" id="positionBar" style="width:0%"></div></div>
+                <div class="card-sub" id="positionText">0 / 50</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">P&amp;L Over Time</div>
+        <div class="pnl-chart">
+            <canvas id="pnlChart" class="chart-canvas"></canvas>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Positions</div>
+        <div class="card" style="padding:0; overflow: auto; max-height: 300px;">
+            <table>
+                <thead>
+                    <tr><th>Ticker</th><th>Position</th><th>Exposure</th><th>P&amp;L</th><th>Fees</th></tr>
+                </thead>
+                <tbody id="positionsTable">
+                    <tr><td colspan="5" class="empty-state">No positions</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Recent Orders</div>
+        <div class="card" style="padding:0; overflow: auto; max-height: 300px;">
+            <table>
+                <thead>
+                    <tr><th>Time</th><th>Ticker</th><th>Action</th><th>Side</th><th>Price</th><th>Count</th><th>Status</th><th>Strategy</th></tr>
+                </thead>
+                <tbody id="ordersTable">
+                    <tr><td colspan="8" class="empty-state">No orders yet</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Recent Fills</div>
+        <div class="card" style="padding:0; overflow: auto; max-height: 300px;">
+            <table>
+                <thead>
+                    <tr><th>Time</th><th>Ticker</th><th>Action</th><th>Side</th><th>Price</th><th>Count</th></tr>
+                </thead>
+                <tbody id="fillsTable">
+                    <tr><td colspan="6" class="empty-state">No fills yet</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+    // Embedded data snapshot
+    const DATA = {"status": {"balance": 100000, "portfolio_value": 100000, "starting_balance": 100000, "daily_pnl_pct": 0.0, "drawdown_pct": 0.0, "open_orders": 252, "active_markets": 20, "total_fills": 0, "positions": {}, "positions_detail": [], "halted": false, "halt_reason": "", "dry_run": true, "daily_loss_limit": 5.0, "max_drawdown": 15.0, "pnl_history": [{"balance": 100000, "timestamp": "2026-04-16T01:02:23.009805+00:00"}, {"balance": 100000, "timestamp": "2026-04-16T01:02:53.014510+00:00"}]}, "orders": [{"order_id": "paper-000252", "client_order_id": "", "ticker": "KXROBOTMARS-35", "action": "sell", "side": "yes", "type": "limit", "price": 54, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.075523+00:00", "updated_at": "2026-04-16T01:02:53.075523+00:00"}, {"order_id": "paper-000251", "client_order_id": "", "ticker": "KXROBOTMARS-35", "action": "buy", "side": "yes", "type": "limit", "price": 44, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.074308+00:00", "updated_at": "2026-04-16T01:02:53.074308+00:00"}, {"order_id": "paper-000250", "client_order_id": "", "ticker": "KXOAIANTH-40-OAI", "action": "sell", "side": "yes", "type": "limit", "price": 37, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.072756+00:00", "updated_at": "2026-04-16T01:02:53.072756+00:00"}, {"order_id": "paper-000249", "client_order_id": "", "ticker": "KXOAIANTH-40-OAI", "action": "buy", "side": "yes", "type": "limit", "price": 27, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.071741+00:00", "updated_at": "2026-04-16T01:02:53.071741+00:00"}, {"order_id": "paper-000248", "client_order_id": "", "ticker": "KXOAIANTH-40-ANTH", "action": "sell", "side": "yes", "type": "limit", "price": 78, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.069683+00:00", "updated_at": "2026-04-16T01:02:53.069683+00:00"}, {"order_id": "paper-000247", "client_order_id": "", "ticker": "KXOAIANTH-40-ANTH", "action": "buy", "side": "yes", "type": "limit", "price": 68, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.068466+00:00", "updated_at": "2026-04-16T01:02:53.068466+00:00"}, {"order_id": "paper-000246", "client_order_id": "", "ticker": "KXMOONMAN-31-USA", "action": "sell", "side": "yes", "type": "limit", "price": 64, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.066201+00:00", "updated_at": "2026-04-16T01:02:53.066201+00:00"}, {"order_id": "paper-000245", "client_order_id": "", "ticker": "KXMOONMAN-31-USA", "action": "buy", "side": "yes", "type": "limit", "price": 54, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.064447+00:00", "updated_at": "2026-04-16T01:02:53.064447+00:00"}, {"order_id": "paper-000244", "client_order_id": "", "ticker": "KXELONMARS-99", "action": "sell", "side": "yes", "type": "limit", "price": 16, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.061954+00:00", "updated_at": "2026-04-16T01:02:53.061954+00:00"}, {"order_id": "paper-000243", "client_order_id": "", "ticker": "KXELONMARS-99", "action": "buy", "side": "yes", "type": "limit", "price": 6, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.061088+00:00", "updated_at": "2026-04-16T01:02:53.061088+00:00"}, {"order_id": "paper-000242", "client_order_id": "", "ticker": "KXTRILLIONAIRE-30-EM", "action": "sell", "side": "yes", "type": "limit", "price": 94, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.059160+00:00", "updated_at": "2026-04-16T01:02:53.059160+00:00"}, {"order_id": "paper-000241", "client_order_id": "", "ticker": "KXTRILLIONAIRE-30-EM", "action": "buy", "side": "yes", "type": "limit", "price": 84, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:53.057566+00:00", "updated_at": "2026-04-16T01:02:53.057566+00:00"}, {"order_id": "paper-000240", "client_order_id": "", "ticker": "KXJOHNNYDEPP-35-JOH", "action": "sell", "side": "yes", "type": "limit", "price": 54, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.076359+00:00", "updated_at": "2026-04-16T01:02:50.076359+00:00"}, {"order_id": "paper-000239", "client_order_id": "", "ticker": "KXJOHNNYDEPP-35-JOH", "action": "buy", "side": "yes", "type": "limit", "price": 44, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.064648+00:00", "updated_at": "2026-04-16T01:02:50.064648+00:00"}, {"order_id": "paper-000238", "client_order_id": "", "ticker": "KXEARTHQUAKECALIFORNIA-35", "action": "sell", "side": "yes", "type": "limit", "price": 64, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.063464+00:00", "updated_at": "2026-04-16T01:02:50.063464+00:00"}, {"order_id": "paper-000237", "client_order_id": "", "ticker": "KXEARTHQUAKECALIFORNIA-35", "action": "buy", "side": "yes", "type": "limit", "price": 54, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.062636+00:00", "updated_at": "2026-04-16T01:02:50.062636+00:00"}, {"order_id": "paper-000236", "client_order_id": "", "ticker": "KXPERSONPRESMAM-45", "action": "sell", "side": "yes", "type": "limit", "price": 14, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.061669+00:00", "updated_at": "2026-04-16T01:02:50.061669+00:00"}, {"order_id": "paper-000235", "client_order_id": "", "ticker": "KXPERSONPRESMAM-45", "action": "buy", "side": "yes", "type": "limit", "price": 4, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.060748+00:00", "updated_at": "2026-04-16T01:02:50.060748+00:00"}, {"order_id": "paper-000234", "client_order_id": "", "ticker": "KXBRUVSEAT-35", "action": "sell", "side": "yes", "type": "limit", "price": 6, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.059697+00:00", "updated_at": "2026-04-16T01:02:50.059697+00:00"}, {"order_id": "paper-000233", "client_order_id": "", "ticker": "KXBRUVSEAT-35", "action": "buy", "side": "yes", "type": "limit", "price": 1, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.058635+00:00", "updated_at": "2026-04-16T01:02:50.058635+00:00"}, {"order_id": "paper-000232", "client_order_id": "", "ticker": "KXNEXTISRAELPM-45JAN01-NBEN", "action": "sell", "side": "yes", "type": "limit", "price": 40, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.057133+00:00", "updated_at": "2026-04-16T01:02:50.057133+00:00"}, {"order_id": "paper-000231", "client_order_id": "", "ticker": "KXNEXTISRAELPM-45JAN01-NBEN", "action": "buy", "side": "yes", "type": "limit", "price": 30, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.056070+00:00", "updated_at": "2026-04-16T01:02:50.056070+00:00"}, {"order_id": "paper-000230", "client_order_id": "", "ticker": "KXPRIMEENGCONSUMPTION-30-SOLAR", "action": "sell", "side": "yes", "type": "limit", "price": 8, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.054833+00:00", "updated_at": "2026-04-16T01:02:50.054833+00:00"}, {"order_id": "paper-000229", "client_order_id": "", "ticker": "KXPRIMEENGCONSUMPTION-30-SOLAR", "action": "buy", "side": "yes", "type": "limit", "price": 1, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:50.053026+00:00", "updated_at": "2026-04-16T01:02:50.053026+00:00"}, {"order_id": "paper-000228", "client_order_id": "", "ticker": "KXTRILLIONAIRE-30-JB", "action": "sell", "side": "yes", "type": "limit", "price": 8, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.064302+00:00", "updated_at": "2026-04-16T01:02:49.064302+00:00"}, {"order_id": "paper-000227", "client_order_id": "", "ticker": "KXTRILLIONAIRE-30-JB", "action": "buy", "side": "yes", "type": "limit", "price": 1, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.063379+00:00", "updated_at": "2026-04-16T01:02:49.063379+00:00"}, {"order_id": "paper-000226", "client_order_id": "", "ticker": "KXFUSION-30-JAN01", "action": "sell", "side": "yes", "type": "limit", "price": 37, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.062202+00:00", "updated_at": "2026-04-16T01:02:49.062202+00:00"}, {"order_id": "paper-000225", "client_order_id": "", "ticker": "KXFUSION-30-JAN01", "action": "buy", "side": "yes", "type": "limit", "price": 27, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.061558+00:00", "updated_at": "2026-04-16T01:02:49.061558+00:00"}, {"order_id": "paper-000224", "client_order_id": "", "ticker": "KXERUPTSUPER-0-50JAN01", "action": "sell", "side": "yes", "type": "limit", "price": 26, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.060508+00:00", "updated_at": "2026-04-16T01:02:49.060508+00:00"}, {"order_id": "paper-000223", "client_order_id": "", "ticker": "KXERUPTSUPER-0-50JAN01", "action": "buy", "side": "yes", "type": "limit", "price": 16, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.059757+00:00", "updated_at": "2026-04-16T01:02:49.059757+00:00"}, {"order_id": "paper-000222", "client_order_id": "", "ticker": "KXTRILLIONAIRE-30-JH", "action": "sell", "side": "yes", "type": "limit", "price": 6, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.058578+00:00", "updated_at": "2026-04-16T01:02:49.058578+00:00"}, {"order_id": "paper-000221", "client_order_id": "", "ticker": "KXTRILLIONAIRE-30-JH", "action": "buy", "side": "yes", "type": "limit", "price": 1, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.057905+00:00", "updated_at": "2026-04-16T01:02:49.057905+00:00"}, {"order_id": "paper-000220", "client_order_id": "", "ticker": "KXPRIMEENGCONSUMPTION-30-OIL", "action": "sell", "side": "yes", "type": "limit", "price": 59, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.056503+00:00", "updated_at": "2026-04-16T01:02:49.056503+00:00"}, {"order_id": "paper-000219", "client_order_id": "", "ticker": "KXPRIMEENGCONSUMPTION-30-OIL", "action": "buy", "side": "yes", "type": "limit", "price": 49, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.055963+00:00", "updated_at": "2026-04-16T01:02:49.055963+00:00"}, {"order_id": "paper-000218", "client_order_id": "", "ticker": "KXMOONMAN-31-PRC", "action": "sell", "side": "yes", "type": "limit", "price": 31, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.054885+00:00", "updated_at": "2026-04-16T01:02:49.054885+00:00"}, {"order_id": "paper-000217", "client_order_id": "", "ticker": "KXMOONMAN-31-PRC", "action": "buy", "side": "yes", "type": "limit", "price": 21, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.053656+00:00", "updated_at": "2026-04-16T01:02:49.053656+00:00"}, {"order_id": "paper-000216", "client_order_id": "", "ticker": "KXPERSONPRESFUENTES-45", "action": "sell", "side": "yes", "type": "limit", "price": 17, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.052808+00:00", "updated_at": "2026-04-16T01:02:49.052808+00:00"}, {"order_id": "paper-000215", "client_order_id": "", "ticker": "KXPERSONPRESFUENTES-45", "action": "buy", "side": "yes", "type": "limit", "price": 7, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.052145+00:00", "updated_at": "2026-04-16T01:02:49.052145+00:00"}, {"order_id": "paper-000214", "client_order_id": "", "ticker": "USCLIMATE-2025", "action": "sell", "side": "yes", "type": "limit", "price": 8, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.051252+00:00", "updated_at": "2026-04-16T01:02:49.051252+00:00"}, {"order_id": "paper-000213", "client_order_id": "", "ticker": "USCLIMATE-2025", "action": "buy", "side": "yes", "type": "limit", "price": 1, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:49.050512+00:00", "updated_at": "2026-04-16T01:02:49.050512+00:00"}, {"order_id": "paper-000212", "client_order_id": "", "ticker": "KXROBOTMARS-35", "action": "sell", "side": "yes", "type": "limit", "price": 54, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.058938+00:00", "updated_at": "2026-04-16T01:02:48.058938+00:00"}, {"order_id": "paper-000211", "client_order_id": "", "ticker": "KXROBOTMARS-35", "action": "buy", "side": "yes", "type": "limit", "price": 44, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.057778+00:00", "updated_at": "2026-04-16T01:02:48.057778+00:00"}, {"order_id": "paper-000210", "client_order_id": "", "ticker": "KXOAIANTH-40-OAI", "action": "sell", "side": "yes", "type": "limit", "price": 37, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.056810+00:00", "updated_at": "2026-04-16T01:02:48.056810+00:00"}, {"order_id": "paper-000209", "client_order_id": "", "ticker": "KXOAIANTH-40-OAI", "action": "buy", "side": "yes", "type": "limit", "price": 27, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.056156+00:00", "updated_at": "2026-04-16T01:02:48.056156+00:00"}, {"order_id": "paper-000208", "client_order_id": "", "ticker": "KXOAIANTH-40-ANTH", "action": "sell", "side": "yes", "type": "limit", "price": 78, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.055119+00:00", "updated_at": "2026-04-16T01:02:48.055119+00:00"}, {"order_id": "paper-000207", "client_order_id": "", "ticker": "KXOAIANTH-40-ANTH", "action": "buy", "side": "yes", "type": "limit", "price": 68, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.054570+00:00", "updated_at": "2026-04-16T01:02:48.054570+00:00"}, {"order_id": "paper-000206", "client_order_id": "", "ticker": "KXMOONMAN-31-USA", "action": "sell", "side": "yes", "type": "limit", "price": 64, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.053569+00:00", "updated_at": "2026-04-16T01:02:48.053569+00:00"}, {"order_id": "paper-000205", "client_order_id": "", "ticker": "KXMOONMAN-31-USA", "action": "buy", "side": "yes", "type": "limit", "price": 54, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.052853+00:00", "updated_at": "2026-04-16T01:02:48.052853+00:00"}, {"order_id": "paper-000204", "client_order_id": "", "ticker": "KXELONMARS-99", "action": "sell", "side": "yes", "type": "limit", "price": 16, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.051886+00:00", "updated_at": "2026-04-16T01:02:48.051886+00:00"}, {"order_id": "paper-000203", "client_order_id": "", "ticker": "KXELONMARS-99", "action": "buy", "side": "yes", "type": "limit", "price": 6, "count": 10, "status": "resting", "strategy_name": "market_maker", "created_at": "2026-04-16T01:02:48.051102+00:00", "updated_at": "2026-04-16T01:02:48.051102+00:00"}], "fills": [], "generated_at": "2026-04-16T01:02:53.105735+00:00"};
+
+    function fmt$(cents) {
+        if (cents == null) return '--';
+        return '$' + (cents / 100).toFixed(2);
+    }
+    function fmtPct(val) {
+        if (val == null) return '--%';
+        return val.toFixed(2) + '%';
+    }
+    function riskClass(pct, limit) {
+        let ratio = Math.abs(pct) / limit;
+        if (ratio > 0.8) return 'danger';
+        if (ratio > 0.5) return 'warning';
+        return 'safe';
+    }
+
+    function drawChart(canvas, data) {
+        let ctx = canvas.getContext('2d');
+        let w = canvas.width = canvas.parentElement.clientWidth - 32;
+        let h = canvas.height = canvas.parentElement.clientHeight - 32;
+        ctx.clearRect(0, 0, w, h);
+
+        if (data.length < 2) {
+            ctx.fillStyle = '#4b5563';
+            ctx.font = '13px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('Collecting data...', w/2, h/2);
+            return;
+        }
+
+        let values = data.map(d => d.balance);
+        let min = Math.min(...values);
+        let max = Math.max(...values);
+        let range = max - min || 1;
+
+        ctx.strokeStyle = '#1f2937';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 5; i++) {
+            let y = h * i / 4;
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+        }
+
+        ctx.beginPath();
+        ctx.strokeStyle = values[values.length-1] >= values[0] ? '#34d399' : '#ef4444';
+        ctx.lineWidth = 2;
+        for (let i = 0; i < values.length; i++) {
+            let x = (i / (values.length - 1)) * w;
+            let y = h - ((values[i] - min) / range) * h * 0.9 - h * 0.05;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        ctx.lineTo(w, h);
+        ctx.lineTo(0, h);
+        ctx.closePath();
+        let grad = ctx.createLinearGradient(0, 0, 0, h);
+        let color = values[values.length-1] >= values[0] ? '52, 211, 153' : '239, 68, 68';
+        grad.addColorStop(0, `rgba(${color}, 0.15)`);
+        grad.addColorStop(1, `rgba(${color}, 0.0)`);
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(fmt$(max), 4, 14);
+        ctx.fillText(fmt$(min), 4, h - 4);
+    }
+
+    function render() {
+        let data = DATA.status;
+        let orders = DATA.orders;
+        let fills = DATA.fills;
+
+        // Status
+        let dot = document.getElementById('statusDot');
+        let text = document.getElementById('statusText');
+        if (data.halted) {
+            dot.className = 'status-dot halted';
+            text.textContent = 'HALTED: ' + data.halt_reason;
+        } else {
+            dot.className = 'status-dot';
+            text.textContent = 'Running' + (data.dry_run ? ' (DRY RUN / PAPER)' : '');
+        }
+
+        // Cards
+        document.getElementById('balance').textContent = fmt$(data.balance);
+        document.getElementById('portfolioValue').textContent = 'Portfolio: ' + fmt$(data.portfolio_value);
+
+        let pnl = data.balance - data.starting_balance;
+        let pnlEl = document.getElementById('dailyPnl');
+        pnlEl.textContent = fmt$(pnl);
+        pnlEl.className = 'card-value ' + (pnl >= 0 ? 'positive' : 'negative');
+        document.getElementById('dailyPnlPct').textContent = fmtPct(data.daily_pnl_pct);
+
+        let ddEl = document.getElementById('drawdown');
+        ddEl.textContent = fmtPct(data.drawdown_pct);
+        ddEl.className = 'card-value ' + (data.drawdown_pct > 10 ? 'negative' : data.drawdown_pct > 5 ? 'neutral' : 'positive');
+
+        document.getElementById('openOrders').textContent = data.open_orders;
+        document.getElementById('activeMarkets').textContent = 'Markets: ' + data.active_markets + ' | Fills: ' + (data.total_fills || 0);
+
+        // Risk bars
+        let dlPct = Math.min(Math.abs(data.daily_pnl_pct) / data.daily_loss_limit * 100, 100);
+        let dlBar = document.getElementById('dailyLossBar');
+        dlBar.style.width = dlPct + '%';
+        dlBar.className = 'risk-fill ' + riskClass(data.daily_pnl_pct, data.daily_loss_limit);
+        document.getElementById('dailyLossText').textContent = Math.abs(data.daily_pnl_pct).toFixed(1) + '% / ' + data.daily_loss_limit + '%';
+
+        let ddPctBar = Math.min(data.drawdown_pct / data.max_drawdown * 100, 100);
+        let ddBar = document.getElementById('drawdownBar');
+        ddBar.style.width = ddPctBar + '%';
+        ddBar.className = 'risk-fill ' + riskClass(data.drawdown_pct, data.max_drawdown);
+        document.getElementById('drawdownText').textContent = data.drawdown_pct.toFixed(1) + '% / ' + data.max_drawdown + '%';
+
+        let posCount = Object.keys(data.positions || {}).filter(k => data.positions[k] !== 0).length;
+        let posBar = document.getElementById('positionBar');
+        posBar.style.width = Math.min(posCount / 50 * 100, 100) + '%';
+        posBar.className = 'risk-fill ' + riskClass(posCount, 50);
+        document.getElementById('positionText').textContent = posCount + ' / 50';
+
+        // Positions table
+        let posTbody = document.getElementById('positionsTable');
+        let positions = data.positions_detail || [];
+        if (positions.length === 0) {
+            posTbody.innerHTML = '<tr><td colspan="5" class="empty-state">No positions</td></tr>';
+        } else {
+            posTbody.innerHTML = positions.map(p => `
+                <tr>
+                    <td>${p.ticker}</td>
+                    <td style="color:${p.position > 0 ? '#34d399' : p.position < 0 ? '#ef4444' : '#6b7280'}">${p.position}</td>
+                    <td>${fmt$(p.market_exposure)}</td>
+                    <td style="color:${p.realized_pnl >= 0 ? '#34d399' : '#ef4444'}">${fmt$(p.realized_pnl)}</td>
+                    <td>${fmt$(p.fees_paid)}</td>
+                </tr>
+            `).join('');
+        }
+
+        // PnL chart
+        drawChart(document.getElementById('pnlChart'), data.pnl_history || []);
+
+        // Orders table
+        let ordTbody = document.getElementById('ordersTable');
+        if (orders.length === 0) {
+            ordTbody.innerHTML = '<tr><td colspan="8" class="empty-state">No orders yet</td></tr>';
+        } else {
+            ordTbody.innerHTML = orders.map(o => `
+                <tr>
+                    <td>${o.created_at ? o.created_at.slice(11,19) : '--'}</td>
+                    <td>${o.ticker}</td>
+                    <td><span class="tag tag-${o.action}">${o.action.toUpperCase()}</span></td>
+                    <td><span class="tag tag-${o.side}">${o.side.toUpperCase()}</span></td>
+                    <td>${o.price}&#162;</td>
+                    <td>${o.count}</td>
+                    <td><span class="tag tag-${o.status}">${o.status}</span></td>
+                    <td>${o.strategy_name || '-'}</td>
+                </tr>
+            `).join('');
+        }
+
+        // Fills table
+        let fillTbody = document.getElementById('fillsTable');
+        if (fills.length === 0) {
+            fillTbody.innerHTML = '<tr><td colspan="6" class="empty-state">No fills yet</td></tr>';
+        } else {
+            fillTbody.innerHTML = fills.map(f => `
+                <tr>
+                    <td>${f.created_at ? f.created_at.slice(11,19) : '--'}</td>
+                    <td>${f.ticker}</td>
+                    <td><span class="tag tag-${f.action}">${f.action.toUpperCase()}</span></td>
+                    <td><span class="tag tag-${f.side}">${f.side.toUpperCase()}</span></td>
+                    <td>${f.price}&#162;</td>
+                    <td>${f.count}</td>
+                </tr>
+            `).join('');
+        }
+    }
+
+    render();
+    window.addEventListener('resize', () => drawChart(document.getElementById('pnlChart'), DATA.status.pnl_history || []));
+    </script>
+</body>
+</html>
