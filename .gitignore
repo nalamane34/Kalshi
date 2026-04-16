@@ -8,6 +8,8 @@ build/
 venv/
 .env
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 .pytest_cache/
